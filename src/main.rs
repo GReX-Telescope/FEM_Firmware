@@ -5,7 +5,6 @@
 // External Imports
 use atsamd_hal as hal;
 use cortex_m_semihosting::hprintln;
-use embedded_hal::prelude::*;
 use hal::adc::Adc;
 use hal::clock::{ClockGenId, ClockSource, GenericClockController};
 use hal::rtc::{Count32Mode, Duration, Rtc};
@@ -28,18 +27,23 @@ const LOG_DET_LOAD_RES: f32 = 33e3;
 const BYTE_BUFF_SIZE: usize = 256;
 
 // Update period for ADCs
-const ADC_UPDATE: u32 = 1; 
+const ADC_UPDATE: u32 = 1;
 
 // Give the PAC and one unused interrupt due to one priority for the software tasks
 #[app(device = hal::target_device, peripherals = true, dispatchers = [EVSYS])]
 mod app {
     use super::*;
+    use embedded_hal::prelude::*;
 
     #[shared]
     struct Shared {
         rf1_power: f32,
         rf2_power: f32,
         uart: bsp::UartStruct,
+        rf1_lna_en: bsp::Lna1En,
+        rf2_lna_en: bsp::Lna2En,
+        attenuator: atten::HMC291<bsp::V1, bsp::V2>,
+        if_good_threshold: f32,
     }
 
     // Only single tasks will ever have access to these
@@ -105,8 +109,8 @@ mod app {
         // Configure GPIO
         let rf1_stat_led: bsp::Rf1Led = pins.rf1_stat_led.into();
         let rf2_stat_led: bsp::Rf2Led = pins.rf2_stat_led.into();
-        let rf1_led_en: bsp::Lna1En = pins.rf1_lna_en.into();
-        let rf2_led_en: bsp::Lna2En = pins.rf2_lna_en.into();
+        let rf1_lna_en: bsp::Lna1En = pins.rf1_lna_en.into();
+        let rf2_lna_en: bsp::Lna2En = pins.rf2_lna_en.into();
 
         // Configure attenuator
         let v1: bsp::V1 = pins.atten_v1.into();
@@ -132,6 +136,10 @@ mod app {
                 rf1_power: 0.0,
                 rf2_power: 0.0,
                 uart,
+                rf1_lna_en,
+                rf2_lna_en,
+                attenuator,
+                if_good_threshold: 0.0,
             },
             Local {
                 adc,
@@ -158,13 +166,16 @@ mod app {
         update_if_powers::spawn_after(Duration::secs(ADC_UPDATE)).unwrap();
     }
 
+    #[task]
+    fn rf_status_led(mut cs: rf_status_led::Context) {}
+
     #[task(local = [byte_vec, curly_counter, is_reading], shared = [uart], binds = SERCOM0)]
     fn handle_incoming_uart(mut cx: handle_incoming_uart::Context) {
         // Unpack context
         let byte_vec = cx.local.byte_vec;
         let is_reading = cx.local.is_reading;
         // RXC gets thrown on each byte and reading clears
-        let byte = cx.shared.uart.lock(|uart| (*uart).read()).unwrap();
+        let byte = cx.shared.uart.lock(|uart| uart.read()).unwrap();
         // Read bytes until we've matched all the curlies
         // Once that's done - deserialize into a command and dispatch the event
         if *is_reading {
@@ -178,7 +189,7 @@ mod app {
                 *is_reading = false;
                 // Deserialize
                 match json::from_slice(byte_vec.as_slice()) {
-                    Ok((payload,_)) => control::spawn(payload).unwrap(),
+                    Ok((payload, _)) => control::spawn(payload).unwrap(),
                     Err(_) => hprintln!("Invalid JSON Control Payload!").unwrap(),
                 }
                 // Clear all the bytes
@@ -192,12 +203,32 @@ mod app {
         }
     }
 
-    #[task]
-    fn control(mut cs: control::Context, payload: m_c::Control) {
+    #[task(shared = [rf1_lna_en, rf2_lna_en, attenuator, if_good_threshold])]
+    fn control(mut cx: control::Context, payload: m_c::Control) {
+        // Unpack context
+        let rf1_lna_en = cx.shared.rf1_lna_en;
+        let rf2_lna_en = cx.shared.rf2_lna_en;
+        let attenuator = cx.shared.attenuator;
+        let if_good_threshold = cx.shared.if_good_threshold;
         // Do all the updates from the new control payload
         // Calibration (PWM) outputs
         // LNA power outputs
+        rf1_lna_en.lock(|pin| pin.set(payload.lna_one_powered));
+        rf2_lna_en.lock(|pin| pin.set(payload.lna_two_powered));
         // Attenuation level
+        attenuator.lock(|atten| {
+            atten.set_atten(match payload.attenuation_level {
+                0 => atten::Attenuation::Zero,
+                1 => atten::Attenuation::Four,
+                2 => atten::Attenuation::Eight,
+                3 => atten::Attenuation::Twelve,
+                _ => unreachable!(),
+            })
+        });
         // IF power good threshold
+        if_good_threshold.lock(|x| *x = payload.if_power_threshold);
     }
+
+    #[task]
+    fn monitor(mut cx: monitor::Context) {}
 }
