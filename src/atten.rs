@@ -1,5 +1,6 @@
 use embedded_hal::digital::v2::OutputPin;
 
+#[repr(u8)]
 #[derive(Debug, Clone, Copy)]
 pub enum Attenuation {
     Zero,

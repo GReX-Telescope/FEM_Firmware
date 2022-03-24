@@ -20,7 +20,6 @@ use panic_semihosting as _;
 use rtic::app;
 use serde_json_core as json;
 
-
 // Local modules
 mod atten;
 mod bsp;
@@ -31,10 +30,10 @@ mod m_c;
 // Hardware specific constants
 const LOG_DET_LOAD_RES: f32 = 33e3;
 const BYTE_BUFF_SIZE: usize = 256;
-const LNA_CAL_ON_FREQ: u32 = 32;
+const LNA_CAL_ON_KHZ: u32 = 32;
 
-// Update period for ADCs
-const ADC_UPDATE: u32 = 1;
+// Update period for sending the monitor payload
+const MONITOR_UPDATE: u32 = 1;
 
 // Give the PAC and one unused interrupt due to one priority for the software tasks
 #[app(device = hal::target_device, peripherals = true, dispatchers = [EVSYS])]
@@ -52,6 +51,7 @@ mod app {
         if_good_threshold: f32,
         cal_1: calibration::LnaCalibration<Pwm0>,
         cal_2: calibration::LnaCalibration<Pwm2>,
+        board_temp: f32,
     }
 
     // Only single tasks will ever have access to these
@@ -65,6 +65,9 @@ mod app {
         byte_vec: Vec<u8, BYTE_BUFF_SIZE>,
         curly_counter: u8,
         is_reading: bool,
+        // Status LED
+        rf1_stat_led: bsp::Rf1Led,
+        rf2_stat_led: bsp::Rf2Led,
     }
 
     #[monotonic(binds = RTC, default = true)]
@@ -141,14 +144,14 @@ mod app {
 
         let pwm0 = Pwm0::new(
             &clocks.tcc0_tcc1(&gclk0).unwrap(),
-            LNA_CAL_ON_FREQ.khz(),
+            LNA_CAL_ON_KHZ.khz(),
             peripherals.TCC0,
             &mut peripherals.PM,
         );
 
         let pwm2 = Pwm2::new(
             &clocks.tcc2_tc3(&gclk0).unwrap(),
-            LNA_CAL_ON_FREQ.khz(),
+            LNA_CAL_ON_KHZ.khz(),
             peripherals.TCC2,
             &mut peripherals.PM,
         );
@@ -160,8 +163,8 @@ mod app {
         cal_1.disable();
         cal_2.disable();
 
-        // Schedule all the periodic tasks
-        update_if_powers::spawn_after(Duration::secs(ADC_UPDATE)).unwrap();
+        // Schedule the periodic task of sending monitor data
+        monitor::spawn_after(Duration::secs(MONITOR_UPDATE)).unwrap();
         hprintln!("FEM Initialized!").unwrap();
 
         // Return initial values for shared and local resources
@@ -176,6 +179,7 @@ mod app {
                 if_good_threshold: 0.0,
                 cal_1,
                 cal_2,
+                board_temp: 0.0,
             },
             Local {
                 adc,
@@ -184,9 +188,21 @@ mod app {
                 byte_vec: Vec::<u8, BYTE_BUFF_SIZE>::new(),
                 curly_counter: 0,
                 is_reading: false,
+                rf1_stat_led,
+                rf2_stat_led,
             },
             init::Monotonics(rtc),
         )
+    }
+
+    #[idle]
+    fn idle(_: idle::Context) -> ! {
+        // In the idle task, we update all of the monitor data
+        // We set the status LED
+        loop {
+            update_if_powers::spawn().unwrap();
+            update_status_led::spawn().unwrap();
+        }
     }
 
     #[task(local = [adc, log_det_1, log_det_2], shared = [rf1_power, rf2_power])]
@@ -198,12 +214,34 @@ mod app {
         // Grab updated values and update the shared resource
         cx.shared.rf1_power.lock(|x| *x = log_det_1.read(adc));
         cx.shared.rf2_power.lock(|x| *x = log_det_2.read(adc));
-        // Schedule self for the future
-        update_if_powers::spawn_after(Duration::secs(ADC_UPDATE)).unwrap();
     }
 
-    #[task]
-    fn rf_status_led(mut cs: rf_status_led::Context) {}
+    #[task(shared = [if_good_threshold, cal_1, cal_2, rf1_power, rf2_power], local = [rf1_stat_led, rf2_stat_led])]
+    fn update_status_led(mut cx: update_status_led::Context) {
+        // Unpack Shared
+        let if_good_threshold = cx.shared.if_good_threshold;
+        let cal_1 = cx.shared.cal_1;
+        let cal_2 = cx.shared.cal_2;
+        let rf1_power = cx.shared.rf1_power;
+        let rf2_power = cx.shared.rf2_power;
+        // Unpack Local
+        let rf1_stat_led = cx.local.rf1_stat_led;
+        let rf2_stat_led = cx.local.rf2_stat_led;
+        // If IF power is good, turn status ON, if cal is on, Blink
+        // TODO Blink!
+        (rf1_power, rf2_power, if_good_threshold).lock(|pow_1, pow_2, thresh| {
+            if pow_1 >= thresh {
+                rf1_stat_led.set_high().unwrap();
+            } else {
+                rf1_stat_led.set_low().unwrap();
+            }
+            if pow_2 >= thresh {
+                rf2_stat_led.set_high().unwrap();
+            } else {
+                rf2_stat_led.set_low().unwrap();
+            }
+        });
+    }
 
     #[task(local = [byte_vec, curly_counter, is_reading], shared = [uart], binds = SERCOM0)]
     fn handle_incoming_uart(mut cx: handle_incoming_uart::Context) {
@@ -297,6 +335,51 @@ mod app {
         if_good_threshold.lock(|x| *x = payload.if_power_threshold);
     }
 
-    #[task]
-    fn monitor(mut cx: monitor::Context) {}
+    #[task(shared = [rf1_power, rf2_power, rf1_lna_en, rf2_lna_en, attenuator, if_good_threshold, cal_1, cal_2])]
+    fn monitor(cx: monitor::Context) {
+        // Unpack context
+        let rf1_power = cx.shared.rf1_power;
+        let rf2_power = cx.shared.rf2_power;
+        let rf1_lna_en = cx.shared.rf1_lna_en;
+        let rf2_lna_en = cx.shared.rf2_lna_en;
+        let attenuator = cx.shared.attenuator;
+        let if_good_threshold = cx.shared.if_good_threshold;
+        let cal_1 = cx.shared.cal_1;
+        let cal_2 = cx.shared.cal_2;
+
+        // Build the payloads to serialize
+        let currents = m_c::Currents {
+            raw_input: todo!(),
+            analog: todo!(),
+            lna_one: todo!(),
+            lna_two: todo!(),
+        };
+
+        let voltages = m_c::Voltages {
+            raw_input: todo!(),
+            analog: todo!(),
+            lna_one: todo!(),
+            lna_two: todo!(),
+        };
+
+        let if_power = (rf1_power, rf2_power).lock(|pow_1, pow_2| m_c::IfPower {
+            channel_one: *pow_1,
+            channel_two: *pow_2,
+        });
+
+        let status = (cal_1, cal_2, attenuator).lock(|cal_1, cal_2, atten| m_c::Status {
+            cal_one: cal_1.is_enabled(),
+            cal_two: cal_2.is_enabled(),
+            attenuation_level: atten.get_atten() as u8,
+        });
+
+        let monitor = m_c::Monitor {
+            board_temp: todo!(),
+            voltages,
+            currents,
+            status,
+        };
+
+        // Serialize and transmit
+    }
 }

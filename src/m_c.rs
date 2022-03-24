@@ -22,7 +22,7 @@ pub struct IfPower {
     pub channel_two: f32,
 }
 
-#[derive(Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 pub struct Control {
     pub cal_one: bool,
     pub cal_two: bool,
@@ -33,9 +33,16 @@ pub struct Control {
 }
 
 #[derive(Debug, PartialEq, Serialize)]
+pub struct Status {
+    pub cal_one: bool,
+    pub cal_two: bool,
+    pub attenuation_level: u8,
+}
+
+#[derive(Debug, PartialEq, Serialize)]
 pub struct Monitor {
     pub board_temp: f64,
     pub voltages: Voltages,
     pub currents: Currents,
-    pub control: Control,
+    pub status: Status,
 }
