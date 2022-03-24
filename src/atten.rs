@@ -30,6 +30,7 @@ where
     }
 
     pub fn set_atten(&mut self, atten: Attenuation) {
+        self.state = atten;
         match atten {
             Attenuation::Zero => {
                 self.v1.set_low();

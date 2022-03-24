@@ -5,8 +5,11 @@
 // External Imports
 use atsamd_hal as hal;
 use cortex_m_semihosting::hprintln;
+use embedded_hal::digital::v2::OutputPin;
+use embedded_hal::prelude::*;
 use hal::adc::Adc;
 use hal::clock::{ClockGenId, ClockSource, GenericClockController};
+use hal::pwm::{Channel, Pwm0, Pwm2};
 use hal::rtc::{Count32Mode, Duration, Rtc};
 use hal::sercom::v2::uart;
 use hal::target_device as pac;
@@ -19,12 +22,14 @@ use serde_json_core as json;
 // Local modules
 mod atten;
 mod bsp;
+mod calibration;
 mod log_det;
 mod m_c;
 
 // Hardware specific constants
 const LOG_DET_LOAD_RES: f32 = 33e3;
 const BYTE_BUFF_SIZE: usize = 256;
+const LNA_CAL_ON_FREQ: u8 = 32;
 
 // Update period for ADCs
 const ADC_UPDATE: u32 = 1;
@@ -33,7 +38,6 @@ const ADC_UPDATE: u32 = 1;
 #[app(device = hal::target_device, peripherals = true, dispatchers = [EVSYS])]
 mod app {
     use super::*;
-    use embedded_hal::prelude::*;
 
     #[shared]
     struct Shared {
@@ -44,6 +48,8 @@ mod app {
         rf2_lna_en: bsp::Lna2En,
         attenuator: atten::HMC291<bsp::V1, bsp::V2>,
         if_good_threshold: f32,
+        cal_1: calibration::LnaCalibration<Pwm0>,
+        cal_2: calibration::LnaCalibration<Pwm2>,
     }
 
     // Only single tasks will ever have access to these
@@ -76,7 +82,7 @@ mod app {
         );
 
         // Configure monotonic timer
-        let _gclk = clocks.gclk0();
+        let gclk0 = clocks.gclk0();
         let rtc_clock_src = clocks
             .configure_gclk_divider_and_source(ClockGenId::GCLK2, 1, ClockSource::XOSC32K, false)
             .unwrap();
@@ -126,6 +132,32 @@ mod app {
             pins.scl.into(),
         );
 
+        // Configure PWM
+        // Do we need these pins???
+        let _rf1_cal: bsp::Rf1Pwm = pins.rf1_cal_tone.into();
+        let _rf2_cal: bsp::Rf2Pwm = pins.rf2_cal_tone.into();
+
+        let mut pwm0 = Pwm0::new(
+            &clocks.tcc0_tcc1(&gclk0).unwrap(),
+            LNA_CAL_ON_FREQ.khz(),
+            peripherals.TCC0,
+            &mut peripherals.PM,
+        );
+
+        let mut pwm2 = Pwm2::new(
+            &clocks.tcc2_tc3(&gclk0).unwrap(),
+            LNA_CAL_ON_FREQ.khz(),
+            peripherals.TCC2,
+            &mut peripherals.PM,
+        );
+
+        let cal_1 = calibration::LnaCalibration::new(pwm0, Channel::_2);
+        let cal_2 = calibration::LnaCalibration::new(pwm2, Channel::_1);
+
+        // Disable on startup
+        cal_1.disable();
+        cal_2.disable();
+
         // Schedule all the periodic tasks
         update_if_powers::spawn_after(Duration::secs(ADC_UPDATE)).unwrap();
         hprintln!("FEM Initialized!").unwrap();
@@ -140,6 +172,8 @@ mod app {
                 rf2_lna_en,
                 attenuator,
                 if_good_threshold: 0.0,
+                cal_1,
+                cal_2,
             },
             Local {
                 adc,
@@ -203,18 +237,50 @@ mod app {
         }
     }
 
-    #[task(shared = [rf1_lna_en, rf2_lna_en, attenuator, if_good_threshold])]
+    #[task(shared = [rf1_lna_en, rf2_lna_en, attenuator, if_good_threshold, cal_1, cal_2])]
     fn control(mut cx: control::Context, payload: m_c::Control) {
         // Unpack context
-        let rf1_lna_en = cx.shared.rf1_lna_en;
-        let rf2_lna_en = cx.shared.rf2_lna_en;
-        let attenuator = cx.shared.attenuator;
-        let if_good_threshold = cx.shared.if_good_threshold;
+        let mut rf1_lna_en = cx.shared.rf1_lna_en;
+        let mut rf2_lna_en = cx.shared.rf2_lna_en;
+        let mut attenuator = cx.shared.attenuator;
+        let mut if_good_threshold = cx.shared.if_good_threshold;
+        let mut cal_1 = cx.shared.cal_1;
+        let mut cal_2 = cx.shared.cal_2;
         // Do all the updates from the new control payload
         // Calibration (PWM) outputs
+        cal_1.lock(|cal| {
+            if payload.cal_one {
+                cal.enable();
+            } else {
+                cal.disable();
+            }
+        });
+        cal_2.lock(|cal| {
+            if payload.cal_two {
+                cal.enable();
+            } else {
+                cal.disable();
+            }
+        });
         // LNA power outputs
-        rf1_lna_en.lock(|pin| pin.set(payload.lna_one_powered));
-        rf2_lna_en.lock(|pin| pin.set(payload.lna_two_powered));
+        rf1_lna_en
+            .lock(|pin| {
+                if payload.lna_one_powered {
+                    pin.set_high()
+                } else {
+                    pin.set_low()
+                }
+            })
+            .unwrap();
+        rf2_lna_en
+            .lock(|pin| {
+                if payload.lna_two_powered {
+                    pin.set_high()
+                } else {
+                    pin.set_low()
+                }
+            })
+            .unwrap();
         // Attenuation level
         attenuator.lock(|atten| {
             atten.set_atten(match payload.attenuation_level {

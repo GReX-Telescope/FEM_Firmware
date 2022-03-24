@@ -35,8 +35,14 @@ hal::bsp_pins!(
         aliases: { PushPullOutput: V2 }
     },
     // PWM
-    PA18 { name: rf1_cal_tone },
-    PA17 { name: rf2_cal_tone },
+    PA18 {
+        name: rf1_cal_tone,
+        aliases: { AlternateF: Rf1Pwm }
+    }, //TCC0/WO[2]
+    PA17 {
+        name: rf2_cal_tone,
+        aliases: { AlternateE: Rf2Pwm }
+    }, //TCC2/WO[1]
     // ADC
     PB02 {
         name: rf1_if_pow,
