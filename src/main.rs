@@ -381,5 +381,8 @@ mod app {
         };
 
         // Serialize and transmit
+
+        // Schedule self for later
+        monitor::spawn_after(Duration::secs(MONITOR_UPDATE)).unwrap();
     }
 }
