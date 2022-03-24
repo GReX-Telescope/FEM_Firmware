@@ -13,11 +13,13 @@ use hal::pwm::{Channel, Pwm0, Pwm2};
 use hal::rtc::{Count32Mode, Duration, Rtc};
 use hal::sercom::v2::uart;
 use hal::target_device as pac;
+use hal::time::*;
 use heapless::Vec;
 use pac::ADC;
 use panic_semihosting as _;
 use rtic::app;
 use serde_json_core as json;
+
 
 // Local modules
 mod atten;
@@ -29,7 +31,7 @@ mod m_c;
 // Hardware specific constants
 const LOG_DET_LOAD_RES: f32 = 33e3;
 const BYTE_BUFF_SIZE: usize = 256;
-const LNA_CAL_ON_FREQ: u8 = 32;
+const LNA_CAL_ON_FREQ: u32 = 32;
 
 // Update period for ADCs
 const ADC_UPDATE: u32 = 1;
@@ -137,22 +139,22 @@ mod app {
         let _rf1_cal: bsp::Rf1Pwm = pins.rf1_cal_tone.into();
         let _rf2_cal: bsp::Rf2Pwm = pins.rf2_cal_tone.into();
 
-        let mut pwm0 = Pwm0::new(
+        let pwm0 = Pwm0::new(
             &clocks.tcc0_tcc1(&gclk0).unwrap(),
             LNA_CAL_ON_FREQ.khz(),
             peripherals.TCC0,
             &mut peripherals.PM,
         );
 
-        let mut pwm2 = Pwm2::new(
+        let pwm2 = Pwm2::new(
             &clocks.tcc2_tc3(&gclk0).unwrap(),
             LNA_CAL_ON_FREQ.khz(),
             peripherals.TCC2,
             &mut peripherals.PM,
         );
 
-        let cal_1 = calibration::LnaCalibration::new(pwm0, Channel::_2);
-        let cal_2 = calibration::LnaCalibration::new(pwm2, Channel::_1);
+        let mut cal_1 = calibration::LnaCalibration::new(pwm0, Channel::_2);
+        let mut cal_2 = calibration::LnaCalibration::new(pwm2, Channel::_1);
 
         // Disable on startup
         cal_1.disable();
