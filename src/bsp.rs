@@ -72,8 +72,8 @@ hal::bsp_pins!(
     }, //ALTC_SERCOM0[3]
 );
 
-type UartPads = uart::Pads<Sercom0, UartRx, UartTx>;
-type UartConfig = uart::Config<UartPads, uart::EightBit>;
+pub type UartPads = uart::Pads<Sercom0, UartRx, UartTx>;
+pub type UartConfig = uart::Config<UartPads, uart::EightBit>;
 pub type UartStruct = uart::Uart<UartConfig, uart::Duplex>;
 
 pub fn uart(
@@ -93,15 +93,15 @@ pub fn uart(
     config.enable()
 }
 
-type I2cPads = i2c::Pads<Sercom2, Sda, Scl>;
-type I2cStruct = i2c::I2c<i2c::Config<I2cPads>>;
+pub type I2cPads = i2c::Pads<Sercom2, Sda, Scl>;
+pub type I2c = i2c::I2c<i2c::Config<I2cPads>>;
 pub fn i2c(
     clocks: &mut GenericClockController,
     pm: &mut PM,
     sercom: SERCOM2,
     sda: Sda,
     scl: Scl,
-) -> I2cStruct {
+) -> I2c {
     let gclk0 = clocks.gclk0();
     let clock = &clocks.sercom2_core(&gclk0).unwrap();
     let freq = clock.freq();

@@ -16,9 +16,12 @@ use hal::target_device as pac;
 use hal::time::*;
 use heapless::Vec;
 use pac::ADC;
+use pac194x::{AddrSelect, PAC194X};
 use panic_semihosting as _;
 use rtic::app;
 use serde_json_core as json;
+use shared_bus::{BusManagerCortexM, I2cProxy};
+use core::cell::RefCell;
 
 // Local modules
 mod atten;
@@ -68,6 +71,8 @@ mod app {
         // Status LED
         rf1_stat_led: bsp::Rf1Led,
         rf2_stat_led: bsp::Rf2Led,
+        // Power Monitor
+        power_mon: PAC194X<I2cProxy<'static, rtic::export::interrupt::Mutex<RefCell<bsp::I2c>>>>,
     }
 
     #[monotonic(binds = RTC, default = true)]
@@ -137,6 +142,12 @@ mod app {
             pins.scl.into(),
         );
 
+        // We're going to be passing I2C around between devices, so we need to construct a shared bus
+        let i2c_bus: &'static _ = shared_bus::new_cortexm!(bsp::I2c = i2c).unwrap();
+
+        // For example, the first I2C object is the power sensor
+        let power_mon = PAC194X::new(i2c_bus.acquire_i2c(), AddrSelect::GND);
+
         // Configure PWM
         // Do we need these pins???
         let _rf1_cal: bsp::Rf1Pwm = pins.rf1_cal_tone.into();
@@ -190,6 +201,7 @@ mod app {
                 is_reading: false,
                 rf1_stat_led,
                 rf2_stat_led,
+                power_mon,
             },
             init::Monotonics(rtc),
         )
@@ -214,6 +226,15 @@ mod app {
         // Grab updated values and update the shared resource
         cx.shared.rf1_power.lock(|x| *x = log_det_1.read(adc));
         cx.shared.rf2_power.lock(|x| *x = log_det_2.read(adc));
+    }
+
+    #[task(local = [power_mon])]
+    fn update_voltage_currents(cx: update_voltage_currents::Context) {
+        // Unpack
+        let mut power_mon = cx.local.power_mon;
+        // Example usage
+        power_mon.write_acc_count::<3>(pac194x::regs::AccCount { count: 123456 }).unwrap();
+        let ch1_pow = power_mon.read_vbusn_avg(1).unwrap().voltage;
     }
 
     #[task(shared = [if_good_threshold, cal_1, cal_2, rf1_power, rf2_power], local = [rf1_stat_led, rf2_stat_led])]
