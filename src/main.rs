@@ -4,6 +4,7 @@
 
 // External Imports
 use atsamd_hal as hal;
+use core::cell::RefCell;
 use cortex_m_semihosting::hprintln;
 use embedded_hal::digital::v2::OutputPin;
 use embedded_hal::prelude::*;
@@ -20,8 +21,7 @@ use pac194x::{AddrSelect, PAC194X};
 use panic_semihosting as _;
 use rtic::app;
 use serde_json_core as json;
-use shared_bus::{BusManagerCortexM, I2cProxy};
-use core::cell::RefCell;
+use shared_bus::I2cProxy;
 
 // Local modules
 mod atten;
@@ -34,6 +34,8 @@ mod m_c;
 const LOG_DET_LOAD_RES: f32 = 33e3;
 const BYTE_BUFF_SIZE: usize = 256;
 const LNA_CAL_ON_KHZ: u32 = 32;
+const RSENSE_ANALOG_INPUT: f32 = 0.1;
+const RSENSE_LNA: f32 = 0.5;
 
 // Update period for sending the monitor payload
 const MONITOR_UPDATE: u32 = 1;
@@ -55,6 +57,8 @@ mod app {
         cal_1: calibration::LnaCalibration<Pwm0>,
         cal_2: calibration::LnaCalibration<Pwm2>,
         board_temp: f32,
+        voltages: m_c::Voltages,
+        currents: m_c::Currents,
     }
 
     // Only single tasks will ever have access to these
@@ -143,7 +147,7 @@ mod app {
         );
 
         // We're going to be passing I2C around between devices, so we need to construct a shared bus
-        let i2c_bus: &'static _ = shared_bus::new_cortexm!(bsp::I2c = i2c).unwrap();
+        let i2c_bus = shared_bus::new_cortexm!(bsp::I2c = i2c).unwrap();
 
         // For example, the first I2C object is the power sensor
         let power_mon = PAC194X::new(i2c_bus.acquire_i2c(), AddrSelect::GND);
@@ -181,16 +185,18 @@ mod app {
         // Return initial values for shared and local resources
         (
             Shared {
-                rf1_power: 0.0,
-                rf2_power: 0.0,
                 uart,
                 rf1_lna_en,
                 rf2_lna_en,
                 attenuator,
-                if_good_threshold: 0.0,
                 cal_1,
                 cal_2,
-                board_temp: 0.0,
+                rf1_power: Default::default(),
+                rf2_power: Default::default(),
+                if_good_threshold: Default::default(),
+                board_temp: Default::default(),
+                voltages: Default::default(),
+                currents: Default::default(),
             },
             Local {
                 adc,
@@ -228,13 +234,40 @@ mod app {
         cx.shared.rf2_power.lock(|x| *x = log_det_2.read(adc));
     }
 
-    #[task(local = [power_mon])]
-    fn update_voltage_currents(cx: update_voltage_currents::Context) {
+    #[task(local = [power_mon], shared = [voltages, currents])]
+    fn update_voltage_currents(mut cx: update_voltage_currents::Context) {
         // Unpack
-        let mut power_mon = cx.local.power_mon;
-        // Example usage
-        power_mon.write_acc_count::<3>(pac194x::regs::AccCount { count: 123456 }).unwrap();
-        let ch1_pow = power_mon.read_vbusn_avg(1).unwrap().voltage;
+        let power_mon = cx.local.power_mon;
+        let mut voltages = cx.shared.voltages;
+        let mut currents = cx.shared.currents;
+        // Bus voltages
+        let mut vbus = [0f32; 4];
+        for (i, voltage) in vbus.iter_mut().enumerate() {
+            *voltage = power_mon.read_bus_voltage_n((i + 1) as u8).unwrap();
+        }
+        // Sense voltages
+        let mut vsense = [0f32; 4];
+        for (i, voltage) in vsense.iter_mut().enumerate() {
+            *voltage = power_mon.read_sense_voltage_n((i + 1) as u8).unwrap();
+        }
+        // Calculate currents
+        // Channel Mapping
+        // 1 - Input
+        // 2 - LNA1
+        // 3 - LNA2
+        // 4 - Analog
+        voltages.lock(|v| {
+            v.raw_input = vbus[0];
+            v.analog = vbus[3];
+            v.lna_one = vbus[1];
+            v.lna_two = vbus[2];
+        });
+        currents.lock(|c| {
+            c.raw_input = vbus[0] / RSENSE_ANALOG_INPUT;
+            c.analog = vbus[3] / RSENSE_ANALOG_INPUT;
+            c.lna_one = vbus[1] / RSENSE_LNA;
+            c.lna_two = vbus[2] / RSENSE_LNA;
+        });
     }
 
     #[task(shared = [if_good_threshold, cal_1, cal_2, rf1_power, rf2_power], local = [rf1_stat_led, rf2_stat_led])]
@@ -356,33 +389,19 @@ mod app {
         if_good_threshold.lock(|x| *x = payload.if_power_threshold);
     }
 
-    #[task(shared = [rf1_power, rf2_power, rf1_lna_en, rf2_lna_en, attenuator, if_good_threshold, cal_1, cal_2])]
+    #[task(shared = [rf1_power, rf2_power, attenuator, cal_1, cal_2, voltages, currents, uart])]
     fn monitor(cx: monitor::Context) {
         // Unpack context
         let rf1_power = cx.shared.rf1_power;
         let rf2_power = cx.shared.rf2_power;
-        let rf1_lna_en = cx.shared.rf1_lna_en;
-        let rf2_lna_en = cx.shared.rf2_lna_en;
         let attenuator = cx.shared.attenuator;
-        let if_good_threshold = cx.shared.if_good_threshold;
         let cal_1 = cx.shared.cal_1;
         let cal_2 = cx.shared.cal_2;
+        let mut voltages = cx.shared.voltages;
+        let mut currents = cx.shared.currents;
+        let uart = cx.shared.uart;
 
         // Build the payloads to serialize
-        let currents = m_c::Currents {
-            raw_input: todo!(),
-            analog: todo!(),
-            lna_one: todo!(),
-            lna_two: todo!(),
-        };
-
-        let voltages = m_c::Voltages {
-            raw_input: todo!(),
-            analog: todo!(),
-            lna_one: todo!(),
-            lna_two: todo!(),
-        };
-
         let if_power = (rf1_power, rf2_power).lock(|pow_1, pow_2| m_c::IfPower {
             channel_one: *pow_1,
             channel_two: *pow_2,
@@ -395,13 +414,14 @@ mod app {
         });
 
         let monitor = m_c::Monitor {
-            board_temp: todo!(),
-            voltages,
-            currents,
+            voltages: voltages.lock(|v| v.clone()),
+            currents: currents.lock(|c| c.clone()),
             status,
+            board_temp: todo!(),
         };
 
         // Serialize and transmit
+        // uart.lock(|uart| todo!()).unwrap();
 
         // Schedule self for later
         monitor::spawn_after(Duration::secs(MONITOR_UPDATE)).unwrap();

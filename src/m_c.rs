@@ -1,6 +1,6 @@
 use serde_derive::{Deserialize, Serialize};
 
-#[derive(Debug, PartialEq, Serialize)]
+#[derive(Debug, PartialEq, Serialize, Default, Clone, Copy)]
 pub struct Voltages {
     pub raw_input: f32,
     pub analog: f32,
@@ -8,7 +8,7 @@ pub struct Voltages {
     pub lna_two: f32,
 }
 
-#[derive(Debug, PartialEq, Serialize)]
+#[derive(Debug, PartialEq, Serialize, Default, Clone, Copy)]
 pub struct Currents {
     pub raw_input: f32,
     pub analog: f32,
