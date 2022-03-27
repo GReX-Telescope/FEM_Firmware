@@ -413,7 +413,9 @@ dependencies = [
 
 [[package]]
 name = "pac194x"
-version = "0.1.0"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f86d7349cae3ce84a73bbe17e11aa7846018b5fdd10a623d17728b5ac3a09be"
 dependencies = [
  "embedded-hal",
  "packed_struct",
@@ -531,7 +533,9 @@ checksum = "f497285884f3fcff424ffc933e56d7cbca511def0c9831a7f9b5f6153e3cc89b"
 
 [[package]]
 name = "register_derive"
-version = "0.0.1"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f4394ee9cf58564c7725387d2d88a11a2929ac7092b01ad22cae544224c8cdfb"
 dependencies = [
  "proc-macro2",
  "quote",
