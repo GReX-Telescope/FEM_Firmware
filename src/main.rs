@@ -2,33 +2,38 @@
 #![no_main]
 #![no_std]
 
-// External Imports
-use atsamd_hal as hal;
-use core::cell::RefCell;
-use cortex_m_semihosting::hprintln;
-use embedded_hal::digital::v2::OutputPin;
-use embedded_hal::prelude::*;
-use hal::adc::Adc;
-use hal::clock::{ClockGenId, ClockSource, GenericClockController};
-use hal::pwm::{Channel, Pwm0, Pwm2};
-use hal::rtc::{Count32Mode, Duration, Rtc};
-use hal::sercom::v2::uart;
-use hal::target_device as pac;
-use hal::time::*;
-use heapless::Vec;
-use pac::ADC;
-use pac194x::{AddrSelect, PAC194X};
-use panic_semihosting as _;
-use rtic::app;
-use serde_json_core as json;
-use shared_bus::I2cProxy;
-
 // Local modules
 mod atten;
 mod bsp;
 mod calibration;
 mod log_det;
 mod m_c;
+mod tmp100;
+
+// External Imports
+use core::cell::RefCell;
+use atsamd_hal as hal;
+use embedded_hal::digital::v2::OutputPin;
+use embedded_hal::prelude::*;
+use hal::adc::Adc;
+use hal::clock::{ClockGenId, ClockSource, GenericClockController};
+use hal::delay::Delay;
+use hal::pac;
+use hal::pwm::{Channel, Pwm0, Pwm2};
+use hal::rtc::{Count32Mode, Duration, Rtc};
+use hal::sercom::uart;
+use hal::time::*;
+use heapless::Vec;
+use nb::block;
+use pac::ADC;
+use pac194x::regs as pwr_regs;
+use pac194x::{AddrSelect, PAC194X};
+use panic_probe as _;
+use rtic::app;
+use rtt_target::{rprintln, rtt_init_print};
+use serde_json_core as json;
+use shared_bus::I2cProxy;
+use tmp100::TMP100;
 
 // Hardware specific constants
 const LOG_DET_LOAD_RES: f32 = 33e3;
@@ -41,9 +46,11 @@ const RSENSE_LNA: f32 = 0.5;
 const MONITOR_UPDATE: u32 = 1;
 
 // Give the PAC and one unused interrupt due to one priority for the software tasks
-#[app(device = hal::target_device, peripherals = true, dispatchers = [EVSYS])]
+#[app(device = pac, peripherals = true, dispatchers = [EVSYS])]
 mod app {
     use super::*;
+
+    type I2cBus = I2cProxy<'static, rtic::export::interrupt::Mutex<RefCell<bsp::I2c>>>;
 
     #[shared]
     struct Shared {
@@ -76,7 +83,11 @@ mod app {
         rf1_stat_led: bsp::Rf1Led,
         rf2_stat_led: bsp::Rf2Led,
         // Power Monitor
-        power_mon: PAC194X<I2cProxy<'static, rtic::export::interrupt::Mutex<RefCell<bsp::I2c>>>>,
+        power_mon: PAC194X<I2cBus>,
+        // Temperature Sensor
+        temp_mon: TMP100<I2cBus>,
+        // Delay
+        delay: Delay,
     }
 
     #[monotonic(binds = RTC, default = true)]
@@ -84,8 +95,12 @@ mod app {
 
     #[init]
     fn init(cx: init::Context) -> (Shared, Local, init::Monotonics) {
+        // Setup RTT
+        rtt_init_print!();
+
         // Extract peripherals from context
         let mut peripherals = cx.device;
+        let core = cx.core;
 
         // Setup main clock
         let mut clocks = GenericClockController::with_internal_32kosc(
@@ -103,6 +118,9 @@ mod app {
         clocks.configure_standby(ClockGenId::GCLK2, true);
         let rtc_clock = clocks.rtc(&rtc_clock_src).unwrap();
         let rtc = Rtc::count32_mode(peripherals.RTC, rtc_clock.freq(), &mut peripherals.PM);
+
+        // Delay Obj
+        let delay = Delay::new(core.SYST, &mut clocks);
 
         // Construct all pins
         let pins = bsp::Pins::new(peripherals.PORT);
@@ -129,13 +147,19 @@ mod app {
         // Configure GPIO
         let rf1_stat_led: bsp::Rf1Led = pins.rf1_stat_led.into();
         let rf2_stat_led: bsp::Rf2Led = pins.rf2_stat_led.into();
-        let rf1_lna_en: bsp::Lna1En = pins.rf1_lna_en.into();
-        let rf2_lna_en: bsp::Lna2En = pins.rf2_lna_en.into();
+        let mut rf1_lna_en: bsp::Lna1En = pins.rf1_lna_en.into();
+        let mut rf2_lna_en: bsp::Lna2En = pins.rf2_lna_en.into();
+
+        // Set initial LNA powers to off
+        rf1_lna_en.set_high().unwrap();
+        rf2_lna_en.set_high().unwrap();
 
         // Configure attenuator
         let v1: bsp::V1 = pins.atten_v1.into();
         let v2: bsp::V2 = pins.atten_v2.into();
-        let attenuator = atten::HMC291::new(v1, v2);
+        let mut attenuator = atten::HMC291::new(v1, v2);
+
+        attenuator.set_atten(atten::Attenuation::Twelve);
 
         // Configure I2C
         let i2c = bsp::i2c(
@@ -150,7 +174,24 @@ mod app {
         let i2c_bus = shared_bus::new_cortexm!(bsp::I2c = i2c).unwrap();
 
         // For example, the first I2C object is the power sensor
-        let power_mon = PAC194X::new(i2c_bus.acquire_i2c(), AddrSelect::GND);
+        let mut power_mon = PAC194X::new(i2c_bus.acquire_i2c(), AddrSelect::VDD);
+
+        // And next is the temperature sensor
+        let temp_mon = TMP100::new(i2c_bus.acquire_i2c(),0b1001000);
+
+        power_mon
+            .write_ctrl(pwr_regs::Ctrl {
+                sample_mode: pwr_regs::SampleMode::_1024Adaptive,
+                gpio_alert2: pwr_regs::GpioAlert::Output,
+                slow_alert1: pwr_regs::GpioAlert::Output,
+                channel_n_off: pwr_regs::Channels {
+                    _1: false,
+                    _2: false,
+                    _3: false,
+                    _4: false,
+                },
+            })
+            .unwrap();
 
         // Configure PWM
         // Do we need these pins???
@@ -180,7 +221,7 @@ mod app {
 
         // Schedule the periodic task of sending monitor data
         monitor::spawn_after(Duration::secs(MONITOR_UPDATE)).unwrap();
-        hprintln!("FEM Initialized!").unwrap();
+        rprintln!("FEM Initialized!");
 
         // Return initial values for shared and local resources
         (
@@ -208,6 +249,8 @@ mod app {
                 rf1_stat_led,
                 rf2_stat_led,
                 power_mon,
+                temp_mon,
+                delay,
             },
             init::Monotonics(rtc),
         )
@@ -220,6 +263,8 @@ mod app {
         loop {
             update_if_powers::spawn().unwrap();
             update_status_led::spawn().unwrap();
+            update_voltage_currents::spawn().unwrap();
+            update_board_temp::spawn().unwrap();
         }
     }
 
@@ -234,12 +279,26 @@ mod app {
         cx.shared.rf2_power.lock(|x| *x = log_det_2.read(adc));
     }
 
-    #[task(local = [power_mon], shared = [voltages, currents])]
-    fn update_voltage_currents(mut cx: update_voltage_currents::Context) {
+
+    #[task(local = [temp_mon], shared = [board_temp])]
+    fn update_board_temp(cx: update_board_temp::Context) {
+        // Unpack context
+        let mut board_temp = cx.shared.board_temp;
+        let temp_mon = cx.local.temp_mon;
+        // Grab updated values and update the shared resource
+        board_temp.lock(|x| *x = temp_mon.temp_c().unwrap());
+    }
+
+    #[task(local = [delay, power_mon], shared = [voltages, currents])]
+    fn update_voltage_currents(cx: update_voltage_currents::Context) {
         // Unpack
         let power_mon = cx.local.power_mon;
+        let delay = cx.local.delay;
         let mut voltages = cx.shared.voltages;
         let mut currents = cx.shared.currents;
+        // Refresh to get current values
+        power_mon.refresh().unwrap();
+        delay.delay_ms(1u8);
         // Bus voltages
         let mut vbus = [0f32; 4];
         for (i, voltage) in vbus.iter_mut().enumerate() {
@@ -256,6 +315,7 @@ mod app {
         // 2 - LNA1
         // 3 - LNA2
         // 4 - Analog
+
         voltages.lock(|v| {
             v.raw_input = vbus[0];
             v.analog = vbus[3];
@@ -299,6 +359,7 @@ mod app {
 
     #[task(local = [byte_vec, curly_counter, is_reading], shared = [uart], binds = SERCOM0)]
     fn handle_incoming_uart(mut cx: handle_incoming_uart::Context) {
+        rprintln!("New UART Byte");
         // Unpack context
         let byte_vec = cx.local.byte_vec;
         let is_reading = cx.local.is_reading;
@@ -318,7 +379,7 @@ mod app {
                 // Deserialize
                 match json::from_slice(byte_vec.as_slice()) {
                     Ok((payload, _)) => control::spawn(payload).unwrap(),
-                    Err(_) => hprintln!("Invalid JSON Control Payload!").unwrap(),
+                    Err(_) => rprintln!("Invalid JSON Control Payload!"),
                 }
                 // Clear all the bytes
                 byte_vec.clear();
@@ -333,6 +394,7 @@ mod app {
 
     #[task(shared = [rf1_lna_en, rf2_lna_en, attenuator, if_good_threshold, cal_1, cal_2])]
     fn control(mut cx: control::Context, payload: m_c::Control) {
+        rprintln!("Got new control payload");
         // Unpack context
         let mut rf1_lna_en = cx.shared.rf1_lna_en;
         let mut rf2_lna_en = cx.shared.rf2_lna_en;
@@ -389,9 +451,11 @@ mod app {
         if_good_threshold.lock(|x| *x = payload.if_power_threshold);
     }
 
-    #[task(shared = [rf1_power, rf2_power, attenuator, cal_1, cal_2, voltages, currents, uart])]
+    #[task(shared = [rf1_power, rf2_power, attenuator, cal_1, cal_2, voltages, currents, uart, board_temp])]
     fn monitor(cx: monitor::Context) {
+        rprintln!("Transmitting monitor payload");
         // Unpack context
+        let mut board_temp = cx.shared.board_temp;
         let rf1_power = cx.shared.rf1_power;
         let rf2_power = cx.shared.rf2_power;
         let attenuator = cx.shared.attenuator;
@@ -399,7 +463,7 @@ mod app {
         let cal_2 = cx.shared.cal_2;
         let mut voltages = cx.shared.voltages;
         let mut currents = cx.shared.currents;
-        let uart = cx.shared.uart;
+        let mut uart = cx.shared.uart;
 
         // Build the payloads to serialize
         let if_power = (rf1_power, rf2_power).lock(|pow_1, pow_2| m_c::IfPower {
@@ -417,11 +481,21 @@ mod app {
             voltages: voltages.lock(|v| v.clone()),
             currents: currents.lock(|c| c.clone()),
             status,
-            board_temp: todo!(),
+            board_temp: board_temp.lock(|t| t.clone()),
+            if_power,
         };
 
+        rprintln!("{:#?}", monitor);
+
         // Serialize and transmit
-        // uart.lock(|uart| todo!()).unwrap();
+
+        let json_payload: Vec<u8,1024> = json::to_vec(&monitor).unwrap();
+
+        uart.lock(|uart| {
+            for byte in json_payload {
+                block!(uart.write(byte)).unwrap();
+            }
+        });
 
         // Schedule self for later
         monitor::spawn_after(Duration::secs(MONITOR_UPDATE)).unwrap();

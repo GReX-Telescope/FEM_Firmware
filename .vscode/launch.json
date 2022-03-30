@@ -1,0 +1,15 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "preLaunchTask": "${defaultBuildTask}",
+            "type": "probe-rs-debug",
+            "request": "launch",
+            "name": "probe_rs Executable Test",
+            "cwd": "${workspaceFolder}",
+            "programBinary": "target/thumbv6m-none-eabi/debug/frontend_module",
+            "chip": "ATSAMD21E17L",
+            "probe": "PID:VID:<Serial>",
+        }
+    ]
+}

@@ -1,5 +1,5 @@
 use atsamd_hal::adc::Adc;
-use atsamd_hal::target_device::ADC;
+use atsamd_hal::pac::ADC;
 use embedded_hal::adc::{Channel, OneShot};
 
 const ON_CHIP_PULLDOWN: f32 = 7.2e3;

@@ -41,8 +41,9 @@ pub struct Status {
 
 #[derive(Debug, PartialEq, Serialize)]
 pub struct Monitor {
-    pub board_temp: f64,
+    pub board_temp: f32,
     pub voltages: Voltages,
     pub currents: Currents,
     pub status: Status,
+    pub if_power: IfPower,
 }

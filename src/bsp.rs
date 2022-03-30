@@ -1,9 +1,10 @@
 use atsamd_hal as hal;
 
 use hal::clock::GenericClockController;
-use hal::sercom::v2::{i2c, uart, Sercom0, Sercom2};
+use hal::prelude::*;
+use hal::sercom::{i2c, uart, Sercom0, Sercom2};
 
-use hal::target_device as pac;
+use hal::pac;
 use pac::{PM, SERCOM0, SERCOM2};
 
 hal::bsp_pins!(
@@ -107,7 +108,7 @@ pub fn i2c(
     let freq = clock.freq();
 
     let pads: I2cPads = i2c::Pads::new(sda, scl);
-    let config = i2c::Config::new(pm, sercom, pads, freq);
-
-    config.enable()
+    i2c::Config::new(pm, sercom, pads, freq)
+        .baud(100.khz())
+        .enable()
 }

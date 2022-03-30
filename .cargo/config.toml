@@ -1,5 +1,5 @@
 [target.thumbv6m-none-eabi]
-runner = "probe-run --chip ATSAMD21E17A --speed 400"
+runner = "probe-run --chip ATSAMD21E17L --speed 400"
 rustflags = [
   "-C", "link-arg=-Tlink.x",
   "-C", "link-arg=--nmagic",
