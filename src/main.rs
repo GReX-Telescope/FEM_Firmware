@@ -11,8 +11,8 @@ mod m_c;
 mod tmp100;
 
 // External Imports
-use core::cell::RefCell;
 use atsamd_hal as hal;
+use core::cell::RefCell;
 use embedded_hal::digital::v2::OutputPin;
 use embedded_hal::prelude::*;
 use hal::adc::Adc;
@@ -44,6 +44,8 @@ const RSENSE_LNA: f32 = 0.5;
 
 // Update period for sending the monitor payload
 const MONITOR_UPDATE: u32 = 1;
+// Voltage and current monitor also is once per second
+const V_C_UPDATE: u32 = 2;
 
 // Give the PAC and one unused interrupt due to one priority for the software tasks
 #[app(device = pac, peripherals = true, dispatchers = [EVSYS])]
@@ -120,7 +122,7 @@ mod app {
         let rtc = Rtc::count32_mode(peripherals.RTC, rtc_clock.freq(), &mut peripherals.PM);
 
         // Delay Obj
-        let delay = Delay::new(core.SYST, &mut clocks);
+        let mut delay = Delay::new(core.SYST, &mut clocks);
 
         // Construct all pins
         let pins = bsp::Pins::new(peripherals.PORT);
@@ -174,24 +176,10 @@ mod app {
         let i2c_bus = shared_bus::new_cortexm!(bsp::I2c = i2c).unwrap();
 
         // For example, the first I2C object is the power sensor
-        let mut power_mon = PAC194X::new(i2c_bus.acquire_i2c(), AddrSelect::VDD);
+        let power_mon = PAC194X::new(i2c_bus.acquire_i2c(), AddrSelect::VDD);
 
         // And next is the temperature sensor
-        let temp_mon = TMP100::new(i2c_bus.acquire_i2c(),0b1001000);
-
-        power_mon
-            .write_ctrl(pwr_regs::Ctrl {
-                sample_mode: pwr_regs::SampleMode::_1024Adaptive,
-                gpio_alert2: pwr_regs::GpioAlert::Output,
-                slow_alert1: pwr_regs::GpioAlert::Output,
-                channel_n_off: pwr_regs::Channels {
-                    _1: false,
-                    _2: false,
-                    _3: false,
-                    _4: false,
-                },
-            })
-            .unwrap();
+        let temp_mon = TMP100::new(i2c_bus.acquire_i2c(), 0b1001000);
 
         // Configure PWM
         // Do we need these pins???
@@ -221,6 +209,7 @@ mod app {
 
         // Schedule the periodic task of sending monitor data
         monitor::spawn_after(Duration::secs(MONITOR_UPDATE)).unwrap();
+        update_voltage_currents::spawn_after(Duration::secs(V_C_UPDATE)).unwrap();
         rprintln!("FEM Initialized!");
 
         // Return initial values for shared and local resources
@@ -263,7 +252,6 @@ mod app {
         loop {
             update_if_powers::spawn().unwrap();
             update_status_led::spawn().unwrap();
-            update_voltage_currents::spawn().unwrap();
             update_board_temp::spawn().unwrap();
         }
     }
@@ -279,7 +267,6 @@ mod app {
         cx.shared.rf2_power.lock(|x| *x = log_det_2.read(adc));
     }
 
-
     #[task(local = [temp_mon], shared = [board_temp])]
     fn update_board_temp(cx: update_board_temp::Context) {
         // Unpack context
@@ -289,25 +276,21 @@ mod app {
         board_temp.lock(|x| *x = temp_mon.temp_c().unwrap());
     }
 
-    #[task(local = [delay, power_mon], shared = [voltages, currents])]
+    #[task(local = [power_mon], shared = [voltages, currents])]
     fn update_voltage_currents(cx: update_voltage_currents::Context) {
         // Unpack
         let power_mon = cx.local.power_mon;
-        let delay = cx.local.delay;
         let mut voltages = cx.shared.voltages;
         let mut currents = cx.shared.currents;
-        // Refresh to get current values
-        power_mon.refresh().unwrap();
-        delay.delay_ms(1u8);
         // Bus voltages
         let mut vbus = [0f32; 4];
-        for (i, voltage) in vbus.iter_mut().enumerate() {
-            *voltage = power_mon.read_bus_voltage_n((i + 1) as u8).unwrap();
+        for i in 1..=4 {
+            vbus[i - 1] = power_mon.read_bus_voltage_n(i as u8).unwrap();
         }
         // Sense voltages
         let mut vsense = [0f32; 4];
-        for (i, voltage) in vsense.iter_mut().enumerate() {
-            *voltage = power_mon.read_sense_voltage_n((i + 1) as u8).unwrap();
+        for i in 1..=4 {
+            vsense[i - 1] = power_mon.read_sense_voltage_n(i as u8).unwrap();
         }
         // Calculate currents
         // Channel Mapping
@@ -318,20 +301,26 @@ mod app {
 
         voltages.lock(|v| {
             v.raw_input = vbus[0];
-            v.analog = vbus[3];
             v.lna_one = vbus[1];
             v.lna_two = vbus[2];
+            v.analog = vbus[3];
         });
+        
         currents.lock(|c| {
-            c.raw_input = vbus[0] / RSENSE_ANALOG_INPUT;
-            c.analog = vbus[3] / RSENSE_ANALOG_INPUT;
-            c.lna_one = vbus[1] / RSENSE_LNA;
-            c.lna_two = vbus[2] / RSENSE_LNA;
+            c.raw_input = vsense[0] / RSENSE_ANALOG_INPUT;
+            c.lna_one = vsense[1] / RSENSE_LNA;
+            c.lna_two = vsense[2] / RSENSE_LNA;
+            c.analog = vsense[3] / RSENSE_ANALOG_INPUT;
         });
+        
+        // Refresh to get current values
+        power_mon.refresh_v().unwrap();
+        // Spawn self for future
+        update_voltage_currents::spawn_after(Duration::secs(V_C_UPDATE)).unwrap();
     }
 
     #[task(shared = [if_good_threshold, cal_1, cal_2, rf1_power, rf2_power], local = [rf1_stat_led, rf2_stat_led])]
-    fn update_status_led(mut cx: update_status_led::Context) {
+    fn update_status_led(cx: update_status_led::Context) {
         // Unpack Shared
         let if_good_threshold = cx.shared.if_good_threshold;
         let cal_1 = cx.shared.cal_1;
@@ -393,7 +382,7 @@ mod app {
     }
 
     #[task(shared = [rf1_lna_en, rf2_lna_en, attenuator, if_good_threshold, cal_1, cal_2])]
-    fn control(mut cx: control::Context, payload: m_c::Control) {
+    fn control(cx: control::Context, payload: m_c::Control) {
         rprintln!("Got new control payload");
         // Unpack context
         let mut rf1_lna_en = cx.shared.rf1_lna_en;
@@ -489,7 +478,7 @@ mod app {
 
         // Serialize and transmit
 
-        let json_payload: Vec<u8,1024> = json::to_vec(&monitor).unwrap();
+        let json_payload: Vec<u8, 1024> = json::to_vec(&monitor).unwrap();
 
         uart.lock(|uart| {
             for byte in json_payload {
