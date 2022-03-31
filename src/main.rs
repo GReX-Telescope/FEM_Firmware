@@ -153,15 +153,15 @@ mod app {
         let mut rf2_lna_en: bsp::Lna2En = pins.rf2_lna_en.into();
 
         // Set initial LNA powers to off
-        rf1_lna_en.set_high().unwrap();
-        rf2_lna_en.set_high().unwrap();
+        rf1_lna_en.set_low().unwrap();
+        rf2_lna_en.set_low().unwrap();
 
         // Configure attenuator
         let v1: bsp::V1 = pins.atten_v1.into();
         let v2: bsp::V2 = pins.atten_v2.into();
         let mut attenuator = atten::HMC291::new(v1, v2);
 
-        attenuator.set_atten(atten::Attenuation::Twelve);
+        attenuator.set_atten(atten::Attenuation::Eight);
 
         // Configure I2C
         let i2c = bsp::i2c(

@@ -20,7 +20,7 @@ version = "0.3"
 features = ["cortex-m"]
 
 [dependencies.atsamd-hal]
-path = "/home/kiran/src/atsamd/hal"
+git = "https://github.com/kiranshila/atsamd"
 features = ["samd21el-rt", "rtic"]
 
 [dependencies.serde-json-core]

@@ -44,6 +44,7 @@ dependencies = [
 [[package]]
 name = "atsamd-hal"
 version = "0.15.0"
+source = "git+https://github.com/kiranshila/atsamd#f4c3dc8f8a6cec3829ffc86dee4c52819360f06e"
 dependencies = [
  "atsamd21e",
  "bitfield",
@@ -66,6 +67,7 @@ dependencies = [
 [[package]]
 name = "atsamd21e"
 version = "0.12.0"
+source = "git+https://github.com/kiranshila/atsamd#f4c3dc8f8a6cec3829ffc86dee4c52819360f06e"
 dependencies = [
  "cortex-m 0.7.4",
  "cortex-m-rt",

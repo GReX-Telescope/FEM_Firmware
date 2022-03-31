@@ -34,20 +34,20 @@ where
         self.state = atten;
         match atten {
             Attenuation::Zero => {
-                self.v1.set_low();
-                self.v2.set_low();
+                self.v1.set_high();
+                self.v2.set_high();
             }
             Attenuation::Four => {
-                self.v1.set_low();
-                self.v2.set_high();
-            }
-            Attenuation::Eight => {
                 self.v1.set_high();
                 self.v2.set_low();
             }
-            Attenuation::Twelve => {
-                self.v1.set_high();
+            Attenuation::Eight => {
+                self.v1.set_low();
                 self.v2.set_high();
+            }
+            Attenuation::Twelve => {
+                self.v1.set_low();
+                self.v2.set_low();
             }
         };
     }
