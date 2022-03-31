@@ -9,9 +9,9 @@ fn parallel(z1: f32, z2: f32) -> f32 {
     (z1 * z2) / (z1 + z2)
 }
 
-fn scale_adc_reading(load_res: f32, adc_value: u16, intercept: f32) -> f32 {
+fn scale_adc_reading(load_res: f32, adc_value: f32, intercept: f32) -> f32 {
     let slope = INTERNAL_SLOPE * parallel(load_res, ON_CHIP_PULLDOWN);
-    slope * (adc_value as f32) + intercept
+    slope * adc_value + intercept
 }
 
 pub struct LT5537<P> {
@@ -34,6 +34,7 @@ where
 
     pub fn read(&mut self, adc: &mut Adc<ADC>) -> f32 {
         let raw_adc_value: u16 = adc.read(&mut self.pin).unwrap();
-        scale_adc_reading(self.load_resistance, raw_adc_value, self.intercept)
+        let raw_voltage: f32 = (raw_adc_value as f32) / 4096.0 * 3.3;
+        scale_adc_reading(self.load_resistance, raw_voltage, self.intercept)
     }
 }
