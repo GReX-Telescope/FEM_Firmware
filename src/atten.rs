@@ -9,6 +9,7 @@ pub enum Attenuation {
     Twelve,
 }
 
+#[derive(Debug, PartialEq)]
 pub enum Error<E> {
     /// I2C bus error
     Gpio(E),

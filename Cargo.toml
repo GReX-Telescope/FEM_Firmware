@@ -48,6 +48,5 @@ debug = true
 debug-assertions = false
 incremental = false
 lto = true
-opt-level = 's'
+opt-level = 'z'
 overflow-checks = false
-

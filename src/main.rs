@@ -17,7 +17,6 @@ use embedded_hal::digital::v2::OutputPin;
 use embedded_hal::prelude::*;
 use hal::adc::Adc;
 use hal::clock::{ClockGenId, ClockSource, GenericClockController};
-use hal::delay::Delay;
 use hal::pac;
 use hal::pwm::{Channel, Pwm0, Pwm2};
 use hal::rtc::{Count32Mode, Duration, Rtc};
@@ -26,7 +25,6 @@ use hal::time::*;
 use heapless::Vec;
 use nb::block;
 use pac::ADC;
-use pac194x::regs as pwr_regs;
 use pac194x::{AddrSelect, PAC194X};
 use panic_probe as _;
 use rtic::app;
@@ -100,7 +98,6 @@ mod app {
 
         // Extract peripherals from context
         let mut peripherals = cx.device;
-        let core = cx.core;
 
         // Setup main clock
         let mut clocks = GenericClockController::with_internal_32kosc(
@@ -156,7 +153,7 @@ mod app {
         let v2: bsp::V2 = pins.atten_v2.into();
         let mut attenuator = atten::HMC291::new(v1, v2);
 
-        attenuator.set_atten(atten::Attenuation::Eight);
+        attenuator.set_atten(atten::Attenuation::Eight).unwrap();
 
         // Configure I2C
         let i2c = bsp::i2c(
@@ -317,8 +314,8 @@ mod app {
     fn update_status_led(cx: update_status_led::Context) {
         // Unpack Shared
         let if_good_threshold = cx.shared.if_good_threshold;
-        let cal_1 = cx.shared.cal_1;
-        let cal_2 = cx.shared.cal_2;
+        // let cal_1 = cx.shared.cal_1;
+        //let cal_2 = cx.shared.cal_2;
         let rf1_power = cx.shared.rf1_power;
         let rf2_power = cx.shared.rf2_power;
         // Unpack Local
@@ -422,13 +419,15 @@ mod app {
             .unwrap();
         // Attenuation level
         attenuator.lock(|atten| {
-            atten.set_atten(match payload.attenuation_level {
-                0 => atten::Attenuation::Zero,
-                1 => atten::Attenuation::Four,
-                2 => atten::Attenuation::Eight,
-                3 => atten::Attenuation::Twelve,
-                _ => unreachable!(),
-            }).ok();
+            atten
+                .set_atten(match payload.attenuation_level {
+                    0 => atten::Attenuation::Zero,
+                    1 => atten::Attenuation::Four,
+                    2 => atten::Attenuation::Eight,
+                    3 => atten::Attenuation::Twelve,
+                    _ => unreachable!(),
+                })
+                .unwrap();
         });
         // IF power good threshold
         if_good_threshold.lock(|x| *x = payload.if_power_threshold);
@@ -461,10 +460,10 @@ mod app {
         });
 
         let monitor = m_c::Monitor {
-            voltages: voltages.lock(|v| v.clone()),
-            currents: currents.lock(|c| c.clone()),
+            voltages: voltages.lock(|v| *v),
+            currents: currents.lock(|c| *c),
             status,
-            board_temp: board_temp.lock(|t| t.clone()),
+            board_temp: board_temp.lock(|t| *t),
             if_power,
         };
 
