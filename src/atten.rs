@@ -9,47 +9,53 @@ pub enum Attenuation {
     Twelve,
 }
 
+pub enum Error<E> {
+    /// I2C bus error
+    Gpio(E),
+    /// Errors such as overflowing the stack.
+    Internal,
+}
+
 pub struct HMC291<V1Pin, V2Pin> {
     v1: V1Pin,
     v2: V2Pin,
     state: Attenuation,
 }
 
-impl<V1Pin, V2Pin> HMC291<V1Pin, V2Pin>
+impl<E, V1Pin, V2Pin> HMC291<V1Pin, V2Pin>
 where
-    V1Pin: OutputPin,
-    V2Pin: OutputPin,
+    V1Pin: OutputPin<Error = E>,
+    V2Pin: OutputPin<Error = E>,
 {
     pub fn new(v1: V1Pin, v2: V2Pin) -> Self {
-        let mut s = Self {
+        Self {
             v1,
             v2,
             state: Attenuation::Zero,
-        };
-        s.set_atten(Attenuation::Zero);
-        s
+        }
     }
 
-    pub fn set_atten(&mut self, atten: Attenuation) {
+    pub fn set_atten(&mut self, atten: Attenuation) -> Result<(), Error<E>> {
         self.state = atten;
         match atten {
             Attenuation::Zero => {
-                self.v1.set_high();
-                self.v2.set_high();
+                self.v1.set_high().map_err(Error::Gpio)?;
+                self.v2.set_high().map_err(Error::Gpio)?;
             }
             Attenuation::Four => {
-                self.v1.set_high();
-                self.v2.set_low();
+                self.v1.set_high().map_err(Error::Gpio)?;
+                self.v2.set_low().map_err(Error::Gpio)?;
             }
             Attenuation::Eight => {
-                self.v1.set_low();
-                self.v2.set_high();
+                self.v1.set_low().map_err(Error::Gpio)?;
+                self.v2.set_high().map_err(Error::Gpio)?;
             }
             Attenuation::Twelve => {
-                self.v1.set_low();
-                self.v2.set_low();
+                self.v1.set_low().map_err(Error::Gpio)?;
+                self.v2.set_low().map_err(Error::Gpio)?;
             }
         };
+        Ok(())
     }
 
     pub fn get_atten(&self) -> Attenuation {

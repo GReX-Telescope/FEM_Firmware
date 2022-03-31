@@ -88,8 +88,6 @@ mod app {
         power_mon: PAC194X<I2cBus>,
         // Temperature Sensor
         temp_mon: TMP100<I2cBus>,
-        // Delay
-        delay: Delay,
     }
 
     #[monotonic(binds = RTC, default = true)]
@@ -120,9 +118,6 @@ mod app {
         clocks.configure_standby(ClockGenId::GCLK2, true);
         let rtc_clock = clocks.rtc(&rtc_clock_src).unwrap();
         let rtc = Rtc::count32_mode(peripherals.RTC, rtc_clock.freq(), &mut peripherals.PM);
-
-        // Delay Obj
-        let mut delay = Delay::new(core.SYST, &mut clocks);
 
         // Construct all pins
         let pins = bsp::Pins::new(peripherals.PORT);
@@ -239,7 +234,6 @@ mod app {
                 rf2_stat_led,
                 power_mon,
                 temp_mon,
-                delay,
             },
             init::Monotonics(rtc),
         )
@@ -305,14 +299,14 @@ mod app {
             v.lna_two = vbus[2];
             v.analog = vbus[3];
         });
-        
+
         currents.lock(|c| {
             c.raw_input = vsense[0] / RSENSE_ANALOG_INPUT;
             c.lna_one = vsense[1] / RSENSE_LNA;
             c.lna_two = vsense[2] / RSENSE_LNA;
             c.analog = vsense[3] / RSENSE_ANALOG_INPUT;
         });
-        
+
         // Refresh to get current values
         power_mon.refresh_v().unwrap();
         // Spawn self for future
@@ -434,7 +428,7 @@ mod app {
                 2 => atten::Attenuation::Eight,
                 3 => atten::Attenuation::Twelve,
                 _ => unreachable!(),
-            })
+            }).ok();
         });
         // IF power good threshold
         if_good_threshold.lock(|x| *x = payload.if_power_threshold);
