@@ -46,6 +46,7 @@ const MONITOR_UPDATE: u32 = 250;
 const V_C_UPDATE: u32 = 2;
 // Size of ADC sliding window
 const ADC_AVG: usize = 32;
+const CAL_BLINK_PERIOD_S: u32 = 1;
 
 // Give the PAC and one unused interrupt due to one priority for the software tasks
 #[app(device = pac, peripherals = true, dispatchers = [EVSYS])]
@@ -255,6 +256,16 @@ mod app {
         }
     }
 
+    #[task]
+    fn blink_status_1(cx: blink_status_1::Context) {
+        blink_status_1::spawn_after(Duration::secs(CAL_BLINK_PERIOD_S)).unwrap();
+    }
+
+    #[task]
+    fn blink_status_2(cx: blink_status_2::Context) {
+        blink_status_2::spawn_after(Duration::secs(CAL_BLINK_PERIOD_S)).unwrap();
+    }
+
     #[task(local = [adc, log_det_1, log_det_2], shared = [rf1_power_buffer, rf2_power_buffer, rf1_power, rf2_power])]
     fn update_if_powers(cx: update_if_powers::Context) {
         // Unpack context
@@ -354,6 +365,7 @@ mod app {
                 rf2_stat_led.set_low().unwrap();
             }
         });
+        // If cal is on, start the blink task, if not cancel the task if it is scheduled and do the normal IF level status
     }
 
     #[task(local = [byte_vec, curly_counter, is_reading], shared = [uart], binds = SERCOM0)]
