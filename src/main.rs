@@ -22,7 +22,7 @@ use hal::pwm::{Channel, Pwm0, Pwm2};
 use hal::rtc::{Count32Mode, Duration, Rtc};
 use hal::sercom::uart;
 use hal::time::*;
-use heapless::Vec;
+use heapless::{HistoryBuffer, Vec};
 use nb::block;
 use pac::ADC;
 use pac194x::{AddrSelect, PAC194X};
@@ -40,10 +40,12 @@ const LNA_CAL_ON_KHZ: u32 = 32;
 const RSENSE_ANALOG_INPUT: f32 = 0.1;
 const RSENSE_LNA: f32 = 0.5;
 
-// Update period for sending the monitor payload
-const MONITOR_UPDATE: u32 = 1;
+// Update period for sending the monitor payload in ms
+const MONITOR_UPDATE: u32 = 250;
 // Voltage and current monitor also is once per second
 const V_C_UPDATE: u32 = 2;
+// Size of ADC sliding window
+const ADC_AVG: usize = 32;
 
 // Give the PAC and one unused interrupt due to one priority for the software tasks
 #[app(device = pac, peripherals = true, dispatchers = [EVSYS])]
@@ -54,6 +56,8 @@ mod app {
 
     #[shared]
     struct Shared {
+        rf1_power_buffer: HistoryBuffer<f32, ADC_AVG>,
+        rf2_power_buffer: HistoryBuffer<f32, ADC_AVG>,
         rf1_power: f32,
         rf2_power: f32,
         uart: bsp::UartStruct,
@@ -133,7 +137,9 @@ mod app {
         // Configure ADC
         let rf1_if_pow: bsp::AIN10 = pins.rf1_if_pow.into();
         let rf2_if_pow: bsp::AIN11 = pins.rf2_if_pow.into();
-        let adc = Adc::adc(peripherals.ADC, &mut peripherals.PM, &mut clocks);
+        let mut adc = Adc::adc(peripherals.ADC, &mut peripherals.PM, &mut clocks);
+        adc.samples(pac::adc::avgctrl::SAMPLENUM_A::_8);
+
         // Build wrappers
         let log_det_1 = log_det::LT5537::new(LOG_DET_LOAD_RES, rf1_if_pow);
         let log_det_2 = log_det::LT5537::new(LOG_DET_LOAD_RES, rf2_if_pow);
@@ -153,7 +159,7 @@ mod app {
         let v2: bsp::V2 = pins.atten_v2.into();
         let mut attenuator = atten::HMC291::new(v1, v2);
 
-        attenuator.set_atten(atten::Attenuation::Eight).unwrap();
+        attenuator.set_atten(atten::Attenuation::Zero).unwrap();
 
         // Configure I2C
         let i2c = bsp::i2c(
@@ -200,7 +206,7 @@ mod app {
         cal_2.disable();
 
         // Schedule the periodic task of sending monitor data
-        monitor::spawn_after(Duration::secs(MONITOR_UPDATE)).unwrap();
+        monitor::spawn_after(Duration::millis(MONITOR_UPDATE)).unwrap();
         update_voltage_currents::spawn_after(Duration::secs(V_C_UPDATE)).unwrap();
         rprintln!("FEM Initialized!");
 
@@ -213,6 +219,8 @@ mod app {
                 attenuator,
                 cal_1,
                 cal_2,
+                rf1_power_buffer: HistoryBuffer::new(),
+                rf2_power_buffer: HistoryBuffer::new(),
                 rf1_power: Default::default(),
                 rf2_power: Default::default(),
                 if_good_threshold: Default::default(),
@@ -247,15 +255,26 @@ mod app {
         }
     }
 
-    #[task(local = [adc, log_det_1, log_det_2], shared = [rf1_power, rf2_power])]
-    fn update_if_powers(mut cx: update_if_powers::Context) {
+    #[task(local = [adc, log_det_1, log_det_2], shared = [rf1_power_buffer, rf2_power_buffer, rf1_power, rf2_power])]
+    fn update_if_powers(cx: update_if_powers::Context) {
         // Unpack context
         let adc = cx.local.adc;
         let log_det_1 = cx.local.log_det_1;
         let log_det_2 = cx.local.log_det_2;
-        // Grab updated values and update the shared resource
-        cx.shared.rf1_power.lock(|x| *x = log_det_1.read(adc));
-        cx.shared.rf2_power.lock(|x| *x = log_det_2.read(adc));
+        let buf_1 = cx.shared.rf1_power_buffer;
+        let buf_2 = cx.shared.rf2_power_buffer;
+        let power_1 = cx.shared.rf1_power;
+        let power_2 = cx.shared.rf2_power;
+        (power_1, buf_1).lock(|p, b| {
+            // Push new value to buffer
+            b.write(log_det_1.read(adc));
+            // Update rolling average
+            *p = b.as_slice().iter().sum::<f32>() / b.len() as f32;
+        });
+        (power_2, buf_2).lock(|p, b| {
+            b.write(log_det_2.read(adc));
+            *p = b.as_slice().iter().sum::<f32>() / b.len() as f32;
+        });
     }
 
     #[task(local = [temp_mon], shared = [board_temp])]
@@ -480,6 +499,6 @@ mod app {
         });
 
         // Schedule self for later
-        monitor::spawn_after(Duration::secs(MONITOR_UPDATE)).unwrap();
+        monitor::spawn_after(Duration::millis(MONITOR_UPDATE)).unwrap();
     }
 }

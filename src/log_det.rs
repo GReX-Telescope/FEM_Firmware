@@ -11,7 +11,7 @@ fn parallel(z1: f32, z2: f32) -> f32 {
 
 fn scale_adc_reading(load_res: f32, adc_value: f32, intercept: f32) -> f32 {
     let slope = INTERNAL_SLOPE * parallel(load_res, ON_CHIP_PULLDOWN);
-    slope * adc_value + intercept
+    adc_value / slope + intercept
 }
 
 pub struct LT5537<P> {
