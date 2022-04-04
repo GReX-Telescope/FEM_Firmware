@@ -18,10 +18,10 @@ use embedded_hal::prelude::*;
 use hal::adc::Adc;
 use hal::clock::{ClockGenId, ClockSource, GenericClockController};
 use hal::pac;
+use hal::prelude::*;
 use hal::pwm::{Channel, Pwm0, Pwm2};
 use hal::rtc::{Count32Mode, Duration, Rtc};
 use hal::sercom::uart;
-use hal::time::*;
 use heapless::{HistoryBuffer, Vec};
 use nb::block;
 use pac::ADC;
@@ -71,6 +71,12 @@ mod app {
         board_temp: f32,
         voltages: m_c::Voltages,
         currents: m_c::Currents,
+        // Status LED
+        rf1_stat_led: bsp::Rf1Led,
+        rf2_stat_led: bsp::Rf2Led,
+        // Blinking tasks
+        blink_1_task: Option<blink_1::SpawnHandle>,
+        blink_2_task: Option<blink_2::SpawnHandle>,
     }
 
     // Only single tasks will ever have access to these
@@ -84,9 +90,6 @@ mod app {
         byte_vec: Vec<u8, BYTE_BUFF_SIZE>,
         curly_counter: u8,
         is_reading: bool,
-        // Status LED
-        rf1_stat_led: bsp::Rf1Led,
-        rf2_stat_led: bsp::Rf2Led,
         // Power Monitor
         power_mon: PAC194X<I2cBus>,
         // Temperature Sensor
@@ -132,7 +135,7 @@ mod app {
             pins.txd.into(),
             peripherals.SERCOM0,
         );
-        // We want a hardware task to trigger on recieved bytes
+        // We want a hardware task to trigger on received bytes
         uart.enable_interrupts(uart::Flags::RXC);
 
         // Configure ADC
@@ -181,7 +184,6 @@ mod app {
         let temp_mon = TMP100::new(i2c_bus.acquire_i2c(), 0b1001000);
 
         // Configure PWM
-        // Do we need these pins???
         let _rf1_cal: bsp::Rf1Pwm = pins.rf1_cal_tone.into();
         let _rf2_cal: bsp::Rf2Pwm = pins.rf2_cal_tone.into();
 
@@ -208,6 +210,7 @@ mod app {
 
         // Schedule the periodic task of sending monitor data
         monitor::spawn_after(Duration::millis(MONITOR_UPDATE)).unwrap();
+        // And also schedule the voltage current updates, as that takes 1s to have new data
         update_voltage_currents::spawn_after(Duration::secs(V_C_UPDATE)).unwrap();
         rprintln!("FEM Initialized!");
 
@@ -228,6 +231,10 @@ mod app {
                 board_temp: Default::default(),
                 voltages: Default::default(),
                 currents: Default::default(),
+                rf1_stat_led,
+                rf2_stat_led,
+                blink_1_task: None,
+                blink_2_task: None,
             },
             Local {
                 adc,
@@ -236,8 +243,6 @@ mod app {
                 byte_vec: Vec::<u8, BYTE_BUFF_SIZE>::new(),
                 curly_counter: 0,
                 is_reading: false,
-                rf1_stat_led,
-                rf2_stat_led,
                 power_mon,
                 temp_mon,
             },
@@ -256,14 +261,20 @@ mod app {
         }
     }
 
-    #[task]
-    fn blink_status_1(cx: blink_status_1::Context) {
-        blink_status_1::spawn_after(Duration::secs(CAL_BLINK_PERIOD_S)).unwrap();
+    #[task(shared = [rf1_stat_led, blink_1_task])]
+    fn blink_1(mut cx: blink_1::Context) {
+        cx.shared.rf1_stat_led.lock(|led| led.toggle().unwrap());
+        cx.shared.blink_1_task.lock(|task| {
+            *task = Some(blink_1::spawn_after(Duration::secs(CAL_BLINK_PERIOD_S)).unwrap())
+        });
     }
 
-    #[task]
-    fn blink_status_2(cx: blink_status_2::Context) {
-        blink_status_2::spawn_after(Duration::secs(CAL_BLINK_PERIOD_S)).unwrap();
+    #[task(shared = [rf2_stat_led, blink_2_task])]
+    fn blink_2(mut cx: blink_2::Context) {
+        cx.shared.rf2_stat_led.lock(|led| led.toggle().unwrap());
+        cx.shared.blink_2_task.lock(|task| {
+            *task = Some(blink_2::spawn_after(Duration::secs(CAL_BLINK_PERIOD_S)).unwrap())
+        });
     }
 
     #[task(local = [adc, log_det_1, log_det_2], shared = [rf1_power_buffer, rf2_power_buffer, rf1_power, rf2_power])]
@@ -340,32 +351,43 @@ mod app {
         update_voltage_currents::spawn_after(Duration::secs(V_C_UPDATE)).unwrap();
     }
 
-    #[task(shared = [if_good_threshold, cal_1, cal_2, rf1_power, rf2_power], local = [rf1_stat_led, rf2_stat_led])]
+    #[task(shared = [if_good_threshold, cal_1, cal_2, rf1_power, rf2_power, rf1_stat_led, rf2_stat_led])]
     fn update_status_led(cx: update_status_led::Context) {
         // Unpack Shared
         let if_good_threshold = cx.shared.if_good_threshold;
-        // let cal_1 = cx.shared.cal_1;
-        //let cal_2 = cx.shared.cal_2;
+        let cal_1 = cx.shared.cal_1;
+        let cal_2 = cx.shared.cal_2;
         let rf1_power = cx.shared.rf1_power;
         let rf2_power = cx.shared.rf2_power;
         // Unpack Local
-        let rf1_stat_led = cx.local.rf1_stat_led;
-        let rf2_stat_led = cx.local.rf2_stat_led;
-        // If IF power is good, turn status ON, if cal is on, Blink
-        // TODO Blink!
-        (rf1_power, rf2_power, if_good_threshold).lock(|pow_1, pow_2, thresh| {
-            if pow_1 >= thresh {
-                rf1_stat_led.set_high().unwrap();
-            } else {
-                rf1_stat_led.set_low().unwrap();
-            }
-            if pow_2 >= thresh {
-                rf2_stat_led.set_high().unwrap();
-            } else {
-                rf2_stat_led.set_low().unwrap();
-            }
-        });
-        // If cal is on, start the blink task, if not cancel the task if it is scheduled and do the normal IF level status
+        let rf1_stat_led = cx.shared.rf1_stat_led;
+        let rf2_stat_led = cx.shared.rf2_stat_led;
+        // If IF power is good, turn status ON, if cal is on, ignore because it's being handled elsewhere
+        (
+            cal_1,
+            cal_2,
+            rf1_power,
+            rf2_power,
+            if_good_threshold,
+            rf1_stat_led,
+            rf2_stat_led,
+        )
+            .lock(|c1, c2, pow_1, pow_2, thresh, led1, led2| {
+                if !c1.is_enabled() {
+                    if pow_1 >= thresh {
+                        led1.set_high().unwrap();
+                    } else {
+                        led1.set_low().unwrap();
+                    }
+                }
+                if !c2.is_enabled() {
+                    if pow_2 >= thresh {
+                        led2.set_high().unwrap();
+                    } else {
+                        led2.set_low().unwrap();
+                    }
+                }
+            });
     }
 
     #[task(local = [byte_vec, curly_counter, is_reading], shared = [uart], binds = SERCOM0)]
@@ -403,7 +425,7 @@ mod app {
         }
     }
 
-    #[task(shared = [rf1_lna_en, rf2_lna_en, attenuator, if_good_threshold, cal_1, cal_2])]
+    #[task(shared = [rf1_lna_en, rf2_lna_en, attenuator, if_good_threshold, cal_1, cal_2, blink_1_task, blink_2_task])]
     fn control(cx: control::Context, payload: m_c::Control) {
         rprintln!("Got new control payload");
         // Unpack context
@@ -411,24 +433,44 @@ mod app {
         let mut rf2_lna_en = cx.shared.rf2_lna_en;
         let mut attenuator = cx.shared.attenuator;
         let mut if_good_threshold = cx.shared.if_good_threshold;
-        let mut cal_1 = cx.shared.cal_1;
-        let mut cal_2 = cx.shared.cal_2;
+        let cal_1 = cx.shared.cal_1;
+        let cal_2 = cx.shared.cal_2;
+        let blink_1_task = cx.shared.blink_1_task;
+        let blink_2_task = cx.shared.blink_2_task;
         // Do all the updates from the new control payload
+
         // Calibration (PWM) outputs
-        cal_1.lock(|cal| {
+        // If the blink task is running and we get a disable, turn it off
+        // If the task isn't running and we get an enable, turn it on,
+        // Otherwise, do nothing
+        (blink_1_task, cal_1).lock(|task, cal| {
             if payload.cal_one {
+                task.get_or_insert_with(|| {
+                    blink_1::spawn_after(Duration::secs(CAL_BLINK_PERIOD_S)).unwrap()
+                });
                 cal.enable();
             } else {
+                if let Some(h) = task.take() {
+                    h.cancel().unwrap()
+                }
                 cal.disable();
             }
         });
-        cal_2.lock(|cal| {
-            if payload.cal_two {
+
+        (blink_2_task, cal_2).lock(|task, cal| {
+            if payload.cal_one {
+                task.get_or_insert_with(|| {
+                    blink_2::spawn_after(Duration::secs(CAL_BLINK_PERIOD_S)).unwrap()
+                });
                 cal.enable();
             } else {
+                if let Some(h) = task.take() {
+                    h.cancel().unwrap()
+                }
                 cal.disable();
             }
         });
+
         // LNA power outputs
         rf1_lna_en
             .lock(|pin| {
