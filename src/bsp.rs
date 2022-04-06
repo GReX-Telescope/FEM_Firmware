@@ -3,6 +3,7 @@ use atsamd_hal as hal;
 use hal::clock::GenericClockController;
 use hal::prelude::*;
 use hal::sercom::{i2c, uart, Sercom0, Sercom2};
+use uart::{BaudMode, Oversampling};
 
 use hal::pac;
 use pac::{PM, SERCOM0, SERCOM2};
@@ -89,7 +90,8 @@ pub fn uart(
     let freq = clock.freq();
 
     let pads: UartPads = uart::Pads::<Sercom0>::default().rx(rx).tx(tx);
-    let config: UartConfig = uart::Config::new(pm, sercom, pads, freq);
+    let config: UartConfig = uart::Config::new(pm, sercom, pads, freq)
+        .baud(115200.hz(), BaudMode::Fractional(Oversampling::Bits16));
 
     config.enable()
 }

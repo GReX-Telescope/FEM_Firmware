@@ -45,7 +45,7 @@ const MONITOR_UPDATE: u32 = 250;
 // Voltage and current monitor also is once per second
 const V_C_UPDATE: u32 = 2;
 // Size of ADC sliding window
-const ADC_AVG: usize = 32;
+const ADC_AVG: usize = 128;
 const CAL_BLINK_PERIOD_S: u32 = 1;
 
 // Give the PAC and one unused interrupt due to one priority for the software tasks
@@ -213,6 +213,11 @@ mod app {
         // And also schedule the voltage current updates, as that takes 1s to have new data
         update_voltage_currents::spawn_after(Duration::secs(V_C_UPDATE)).unwrap();
         rprintln!("FEM Initialized!");
+
+        // Todo REMOVE
+        cal_2.enable();
+        rf2_lna_en.set_high().unwrap();
+        blink_2::spawn_after(Duration::secs(CAL_BLINK_PERIOD_S)).unwrap();
 
         // Return initial values for shared and local resources
         (
