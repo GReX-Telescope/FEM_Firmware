@@ -237,6 +237,7 @@ name = "frontend_module"
 version = "0.1.0"
 dependencies = [
  "atsamd-hal",
+ "cortex-m 0.7.4",
  "cortex-m-rtic",
  "embedded-hal",
  "heapless",

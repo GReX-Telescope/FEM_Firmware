@@ -40,12 +40,12 @@ const LNA_CAL_ON_KHZ: u32 = 32;
 const RSENSE_ANALOG_INPUT: f32 = 0.1;
 const RSENSE_LNA: f32 = 0.5;
 
-// Update period for sending the monitor payload in ms
-const MONITOR_UPDATE: u32 = 250;
-// Voltage and current monitor also is once per second
-const V_C_UPDATE: u32 = 2;
+// Update period for sending the monitor payload
+const MONITOR_UPDATE_S: u32 = 1;
+// Voltage and current updates are faster than the monitor time
+const UPDATE_UPDATE_MS: u32 = 100;
 // Size of ADC sliding window
-const ADC_AVG: usize = 128;
+const ADC_AVG: usize = 10;
 const CAL_BLINK_PERIOD_S: u32 = 1;
 
 // Give the PAC and one unused interrupt due to one priority for the software tasks
@@ -209,15 +209,10 @@ mod app {
         cal_2.disable();
 
         // Schedule the periodic task of sending monitor data
-        monitor::spawn_after(Duration::millis(MONITOR_UPDATE)).unwrap();
+        monitor::spawn_after(Duration::secs(MONITOR_UPDATE_S)).unwrap();
         // And also schedule the voltage current updates, as that takes 1s to have new data
-        update_voltage_currents::spawn_after(Duration::secs(V_C_UPDATE)).unwrap();
+        update_monitors::spawn_after(Duration::millis(UPDATE_UPDATE_MS)).unwrap();
         rprintln!("FEM Initialized!");
-
-        // Todo REMOVE
-        cal_2.enable();
-        rf2_lna_en.set_high().unwrap();
-        blink_2::spawn_after(Duration::secs(CAL_BLINK_PERIOD_S)).unwrap();
 
         // Return initial values for shared and local resources
         (
@@ -257,13 +252,20 @@ mod app {
 
     #[idle]
     fn idle(_: idle::Context) -> ! {
-        // In the idle task, we update all of the monitor data
-        // We set the status LED
         loop {
-            update_if_powers::spawn().unwrap();
-            update_status_led::spawn().unwrap();
-            update_board_temp::spawn().unwrap();
+            cortex_m::asm::wfi();
         }
+    }
+
+    #[task]
+    fn update_monitors(_: update_monitors::Context) {
+        // Update all the monitor info
+        update_if_powers::spawn().unwrap();
+        update_status_led::spawn().unwrap();
+        update_board_temp::spawn().unwrap();
+        update_voltage_currents::spawn().unwrap();
+        // Schedule task for future
+        update_monitors::spawn_after(Duration::millis(UPDATE_UPDATE_MS)).unwrap();
     }
 
     #[task(shared = [rf1_stat_led, blink_1_task])]
@@ -352,8 +354,6 @@ mod app {
 
         // Refresh to get current values
         power_mon.refresh_v().unwrap();
-        // Spawn self for future
-        update_voltage_currents::spawn_after(Duration::secs(V_C_UPDATE)).unwrap();
     }
 
     #[task(shared = [if_good_threshold, cal_1, cal_2, rf1_power, rf2_power, rf1_stat_led, rf2_stat_led])]
@@ -397,12 +397,24 @@ mod app {
 
     #[task(local = [byte_vec, curly_counter, is_reading], shared = [uart], binds = SERCOM0)]
     fn handle_incoming_uart(mut cx: handle_incoming_uart::Context) {
-        rprintln!("New UART Byte");
         // Unpack context
         let byte_vec = cx.local.byte_vec;
         let is_reading = cx.local.is_reading;
         // RXC gets thrown on each byte and reading clears
-        let byte = cx.shared.uart.lock(|uart| uart.read()).unwrap();
+        let byte = cx.shared.uart.lock(|uart| match uart.read() {
+            Ok(b) => b,
+            Err(_) => {
+                rprintln!("UART Read Error!");
+                uart.flush_rx_buffer();
+                0u8
+            }
+        });
+
+        // Don't add nulls
+        if byte == 0u8 {
+            return;
+        }
+
         // Read bytes until we've matched all the curlies
         // Once that's done - deserialize into a command and dispatch the event
         if *is_reading {
@@ -463,7 +475,7 @@ mod app {
         });
 
         (blink_2_task, cal_2).lock(|task, cal| {
-            if payload.cal_one {
+            if payload.cal_two {
                 task.get_or_insert_with(|| {
                     blink_2::spawn_after(Duration::secs(CAL_BLINK_PERIOD_S)).unwrap()
                 });
@@ -513,7 +525,6 @@ mod app {
 
     #[task(shared = [rf1_power, rf2_power, attenuator, cal_1, cal_2, voltages, currents, uart, board_temp])]
     fn monitor(cx: monitor::Context) {
-        rprintln!("Transmitting monitor payload");
         // Unpack context
         let mut board_temp = cx.shared.board_temp;
         let rf1_power = cx.shared.rf1_power;
@@ -545,8 +556,6 @@ mod app {
             if_power,
         };
 
-        rprintln!("{:#?}", monitor);
-
         // Serialize and transmit
 
         let json_payload: Vec<u8, 1024> = json::to_vec(&monitor).unwrap();
@@ -555,9 +564,10 @@ mod app {
             for byte in json_payload {
                 block!(uart.write(byte)).unwrap();
             }
+            // Terminate message with LF
+            block!(uart.write(b'\n')).unwrap();
         });
-
-        // Schedule self for later
-        monitor::spawn_after(Duration::millis(MONITOR_UPDATE)).unwrap();
+        // Schedule self for future
+        monitor::spawn_after(Duration::secs(MONITOR_UPDATE_S)).unwrap();
     }
 }
