@@ -3,3 +3,5 @@
 This repo contains the firmware for the Galactic Radio Explorer Telescope (GReX) Frontend Module(FEM).
 
 This builds on Rust Stable (1.59.0) for the ATSAMD21E17L MCU.
+
+Hardware design can be found [here](https://github.com/kiranshila/FEM_Hardware)
